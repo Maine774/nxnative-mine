@@ -118,8 +118,14 @@ jobs:
           mkdir -p game_input
           if [ "$METHOD" = "share_zip" ]; then
             echo "Downloading share.zip from $SOURCE ..."
-            # Use curl with follow redirects, timeout, and resume support
-            curl -L --fail --retry 3 --retry-delay 5 --max-time 600 -o game_input/share.zip "$SOURCE"
+            # Use curl with follow redirects, resume support, stall detection, and generous timeout
+            # -C - : resume from where we left off (if partial file exists)
+            # --max-time 7200 : 2 hour total timeout for 15GB+ files
+            # --speed-limit 1024 --speed-time 30 : fail if speed drops below 1KB/s for 30s
+            # --retry 5 --retry-delay 10 --retry-all-errors : more retries on any error
+            curl -L --fail --retry 5 --retry-delay 10 --retry-all-errors \
+              -C - --max-time 7200 --speed-limit 1024 --speed-time 30 \
+              -o game_input/share.zip "$SOURCE"
             echo "Extracting share.zip ..."
             7z x -ogame_input game_input/share.zip
             # Find the extracted NSP folder (usually a folder with NSP files)
