@@ -162,6 +162,20 @@ jobs:
           # Clean Homebrew cache
           brew cleanup --prune=all
           echo "Cleaned Homebrew cache"
+          # Remove Android SDK (~6 GB)
+          if [ -d /Users/runner/Library/Android ]; then
+            rm -rf /Users/runner/Library/Android
+            echo "Removed Android SDK"
+          fi
+          # Remove Xcode simulators we don't need (~3-5 GB)
+          if [ -d /Applications/Xcode_27.2.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/Library/CoreSimulator/Profiles/Runtimes ]; then
+            xcrun simctl delete unavailable 2>/dev/null || true
+            echo "Cleaned unavailable simulators"
+          fi
+          # Remove unnecessary pre-installed tools
+          rm -rf /usr/local/lib/android 2>/dev/null || true
+          rm -rf /opt/android-sdk 2>/dev/null || true
+          echo "Removed additional Android paths"
           # Show free space
           df -h /Users/runner/work
 
