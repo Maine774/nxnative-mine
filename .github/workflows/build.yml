@@ -127,14 +127,20 @@ jobs:
               -C - --max-time 7200 --speed-limit 1024 --speed-time 30 \
               -o game_input/share.zip "$SOURCE"
             echo "Extracting share.zip ..."
-            7z x -ogame_input game_input/share.zip
-            # Find the extracted NSP folder (usually a folder with NSP files)
-            NSP_DIR=$(find game_input -type f -name '*.nsp' -o -name '*.xci' -o -name '*.nsz' -o -name '*.xcz' | head -1 | xargs dirname)
-            if [ -z "$NSP_DIR" ]; then
-              echo "::error::No NSP/XCI/NSZ/XCZ files found in extracted share.zip"
-              exit 1
+            # Extract to a dedicated subdirectory
+            mkdir -p game_input/extracted
+            7z x -ogame_input/extracted game_input/share.zip
+            # Use the extraction directory directly as NSP_DIR
+            # If there's a single subdirectory, use that; otherwise use extracted itself
+            EXTRACTED_CONTENTS=$(find game_input/extracted -mindepth 1 -maxdepth 1 -type d | wc -l)
+            if [ "$EXTRACTED_CONTENTS" -eq 1 ]; then
+              NSP_DIR=$(find game_input/extracted -mindepth 1 -maxdepth 1 -type d)
+            else
+              NSP_DIR=game_input/extracted
             fi
             echo "NSP_DIR=$NSP_DIR" >> "$GITHUB_OUTPUT"
+            echo "Using NSP_DIR: $NSP_DIR"
+            ls -la "$NSP_DIR"
           else
             # Local folder mode: use the provided path directly
             if [ ! -d "$SOURCE" ]; then
