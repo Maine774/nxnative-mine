@@ -41,7 +41,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Use the default Xcode on the runner (don't hardcode DEVELOPER_DIR)
+  # Toolchain: Xcode 27.2 (dm/gfx/tools/dmsh_chain.lock), pinned by path so the image's default
+  # moving to another Xcode does not move CI. dm/tools/tests/test_ci_toolchain.py keeps this in step.
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
   # Python runs from .venv; do not set PYTHONPATH or let setup-python inject its site-packages
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   # Homebrew
@@ -56,7 +58,7 @@ env:
 jobs:
   build-ipa:
     name: Build IPA (${{ github.event.inputs.artifact_name }})
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 180
 
     steps:
@@ -75,7 +77,6 @@ jobs:
         run: |
           xcodebuild -version
           xcrun metal --version
-          # Use the default Xcode on the runner
           python3 dm/gfx/tools/own_compilers.py --check-metal
 
       - name: Create Python virtual environment (.venv)
