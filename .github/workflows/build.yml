@@ -1,0 +1,195 @@
+# Build Nintendo Switch games to unsigned IPA on macOS runners.
+# Input: share.zip URL (or local NSP folder) for the game, prod.keys as BASE64_KEYS secret.
+# Output: unsigned IPA artifact.
+name: Build IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      method:
+        description: 'How to provide the game files'
+        type: choice
+        required: true
+        default: 'share_zip'
+        options:
+          - share_zip
+          - local_folder
+      source:
+        description: 'share.zip download URL (when method=share_zip) or NSP folder path (when method=local_folder)'
+        type: string
+        required: true
+      artifact_name:
+        description: 'Output artifact name (without .ipa extension)'
+        type: string
+        required: true
+        default: 'totk'
+      platform:
+        description: 'Target platform'
+        type: choice
+        required: true
+        default: 'ios'
+        options:
+          - ios
+          - mac
+          - mac-app
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event.inputs.artifact_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Toolchain: Xcode 27.2 (dm/gfx/tools/dmsh_chain.lock), pinned by path so the image's default
+  # moving to another Xcode does not move CI. dm/tools/tests/test_ci_toolchain.py keeps this in step.
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+  # Python runs from .venv; do not set PYTHONPATH or let setup-python inject its site-packages
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  # Homebrew
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  # .NET
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+  # Metal compiler check uses this
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  build-ipa:
+    name: Build IPA (${{ github.event.inputs.artifact_name }})
+    runs-on: macos-26-arm64
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install macOS dependencies (Homebrew)
+        run: |
+          brew install xcodegen zstd glslang p7zip dotnet@10
+          # dotnet@10 is keg-only; link it for PATH
+          brew link --force dotnet@10
+
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          xcrun metal --version
+          python3 dm/gfx/tools/own_compilers.py --check-metal
+
+      - name: Create Python virtual environment (.venv)
+        run: |
+          python3 -m venv .venv --copies
+          source .venv/bin/activate
+          pip install --upgrade pip setuptools wheel
+          # Core dependencies from the build script
+          pip install lz4 "capstone>=5,<6" fonttools
+          # Additional dependencies for extraction, download, and tooling
+          pip install nsz zbic boto3 botocore zstandard enlighten blessed prefixed jinxed wcwidth pycryptodome
+
+      - name: Write PRODKEYS secret to prod.keys
+        if: ${{ secrets.PRODKEYS != '' }}
+        env:
+          PRODKEYS: ${{ secrets.PRODKEYS }}
+        run: |
+          mkdir -p keys_input
+          # PRODKEYS is raw text (not base64), write directly
+          printf '%s' "$PRODKEYS" > keys_input/prod.keys
+          echo "Wrote PRODKEYS secret to keys_input/prod.keys"
+          # Verify it's a valid keys file
+          if ! grep -q '^master_key_' keys_input/prod.keys; then
+            echo "::warning::prod.keys may be invalid (no master_key_ found)"
+          fi
+          ls -lh keys_input/prod.keys
+
+      - name: Prepare game input directory
+        id: prep_game
+        env:
+          SOURCE: ${{ github.event.inputs.source }}
+          METHOD: ${{ github.event.inputs.method }}
+        run: |
+          mkdir -p game_input
+          if [ "$METHOD" = "share_zip" ]; then
+            echo "Downloading share.zip from $SOURCE ..."
+            # Use curl with follow redirects, timeout, and resume support
+            curl -L --fail --retry 3 --retry-delay 5 --max-time 600 -o game_input/share.zip "$SOURCE"
+            echo "Extracting share.zip ..."
+            7z x -ogame_input game_input/share.zip
+            # Find the extracted NSP folder (usually a folder with NSP files)
+            NSP_DIR=$(find game_input -type f -name '*.nsp' -o -name '*.xci' -o -name '*.nsz' -o -name '*.xcz' | head -1 | xargs dirname)
+            if [ -z "$NSP_DIR" ]; then
+              echo "::error::No NSP/XCI/NSZ/XCZ files found in extracted share.zip"
+              exit 1
+            fi
+            echo "NSP_DIR=$NSP_DIR" >> "$GITHUB_OUTPUT"
+          else
+            # Local folder mode: use the provided path directly
+            if [ ! -d "$SOURCE" ]; then
+              echo "::error::Local folder not found: $SOURCE"
+              exit 1
+            fi
+            echo "NSP_DIR=$SOURCE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build IPA
+        id: build
+        env:
+          NSP_DIR: ${{ steps.prep_game.outputs.NSP_DIR }}
+          KEYS_PATH: keys_input/prod.keys
+          PLATFORM: ${{ github.event.inputs.platform }}
+        run: |
+          source .venv/bin/activate
+          # Run the build script
+          # --platform ios for unsigned IPA
+          # -k for prod.keys
+          # Progress set to 'lines' for clean CI logs
+          python3 scripts/build_ipa_from_nsp.py "$NSP_DIR" \
+            -k "$KEYS_PATH" \
+            --platform "$PLATFORM" \
+            --progress lines \
+            --out "${{ github.event.inputs.artifact_name }}.ipa" \
+            2>&1 | tee build.log
+
+      - name: Find and verify IPA
+        id: find_ipa
+        env:
+          ARTIFACT_NAME: ${{ github.event.inputs.artifact_name }}
+        run: |
+          # The script outputs to the NSP folder by default, or beside the build folder
+          # Search for the IPA
+          IPA_PATH=$(find . -name "${ARTIFACT_NAME}.ipa" -type f 2>/dev/null | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            # Fallback: look for any .ipa
+            IPA_PATH=$(find . -name '*.ipa' -type f 2>/dev/null | head -1)
+            if [ -z "$IPA_PATH" ]; then
+              echo "::error::No .ipa file found"
+              echo "Search results:"
+              find . -name '*.ipa' -type f 2>/dev/null || echo "  (none)"
+              exit 1
+            fi
+            echo "::warning::Using found IPA: $IPA_PATH (not matching artifact name)"
+          fi
+          # Copy to a known location for artifact upload
+          mkdir -p artifacts
+          cp "$IPA_PATH" "artifacts/${ARTIFACT_NAME}.ipa"
+          echo "IPA_PATH=artifacts/${ARTIFACT_NAME}.ipa" >> "$GITHUB_OUTPUT"
+          ls -lh "artifacts/${ARTIFACT_NAME}.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: ${{ steps.find_ipa.outputs.IPA_PATH }}
+          retention-days: 7
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-logs-${{ github.event.inputs.artifact_name }}
+          path: |
+            build.log
+            logs
+          retention-days: 7
