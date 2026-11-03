@@ -150,6 +150,21 @@ jobs:
             echo "NSP_DIR=$SOURCE" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Free disk space before build
+        if: github.event.inputs.method == 'share_zip'
+        run: |
+          echo "Freeing disk space..."
+          # Delete the downloaded archive (16 GB)
+          if [ -f game_input/share.zip ]; then
+            rm -f game_input/share.zip
+            echo "Deleted game_input/share.zip"
+          fi
+          # Clean Homebrew cache
+          brew cleanup --prune=all
+          echo "Cleaned Homebrew cache"
+          # Show free space
+          df -h /Users/runner/work
+
       - name: Build IPA
         id: build
         env:
