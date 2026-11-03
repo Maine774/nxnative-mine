@@ -73,6 +73,8 @@ jobs:
           # dotnet@10 is keg-only; link it for PATH
           brew link --force dotnet@10
 
+      - name: Install the selected Xcode's Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
       - name: Verify toolchain
         run: |
           xcodebuild -version
