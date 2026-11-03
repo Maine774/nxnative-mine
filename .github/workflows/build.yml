@@ -90,12 +90,15 @@ jobs:
           pip install nsz zbic boto3 botocore zstandard enlighten blessed prefixed jinxed wcwidth pycryptodome
 
       - name: Write PRODKEYS secret to prod.keys
-        if: ${{ secrets.PRODKEYS != '' }}
         env:
           PRODKEYS: ${{ secrets.PRODKEYS }}
         run: |
           mkdir -p keys_input
           # PRODKEYS is raw text (not base64), write directly
+          if [ -z "$PRODKEYS" ]; then
+            echo "::error::PRODKEYS secret is not set"
+            exit 1
+          fi
           printf '%s' "$PRODKEYS" > keys_input/prod.keys
           echo "Wrote PRODKEYS secret to keys_input/prod.keys"
           # Verify it's a valid keys file
