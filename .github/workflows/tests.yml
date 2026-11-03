@@ -33,6 +33,7 @@ jobs:
     name: Host unit tests and CPU-only gfx tests
     runs-on: xcode-27
     timeout-minutes: 20
+    # Limit to 4 concurrent runners: this runs in first wave
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,6 +84,7 @@ jobs:
     name: Sanitizers (ASan, UBSan and TSan over the host and CPU texture tests)
     runs-on: xcode-27
     timeout-minutes: 20
+    # Limit to 4 concurrent runners: this runs in first wave
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,6 +111,7 @@ jobs:
     name: Coverage (host, CPU texture and tool tests; report only)
     runs-on: xcode-27
     timeout-minutes: 25
+    # Limit to 4 concurrent runners: this runs in first wave
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -165,6 +168,7 @@ jobs:
     name: Tool tests
     runs-on: xcode-27
     timeout-minutes: 15
+    # Limit to 4 concurrent runners: this runs in first wave
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,6 +214,7 @@ jobs:
 
   build:
     name: Build check (Mac host, gfx tests, iOS sources)
+    needs: host-tests
     runs-on: xcode-27
     timeout-minutes: 40
     steps:
@@ -251,6 +256,7 @@ jobs:
 
   ios-build:
     name: Unsigned iOS app (synthetic modules, Swift and link)
+    needs: sanitizers
     runs-on: xcode-27
     timeout-minutes: 40
     steps:
