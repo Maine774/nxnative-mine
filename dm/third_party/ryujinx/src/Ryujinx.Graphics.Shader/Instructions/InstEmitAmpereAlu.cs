@@ -171,13 +171,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
+        // .FTZ (bit 80 of FSET and FSETP, after the comparison's 76..80, Mesa NAK's layout). Without it a sum of weights that NVIDIA flushes to zero passes a "!= 0" guard and its reciprocal
+        // overflows: Mario Kart World's deferred lighting (635061c90d75a8d1) normalises its four depth-weighted half-resolution samples by 1 / sum only where sum != 0, and the NaN came out
+        // of a min(x, 1.0) as a fully lit dot. The arithmetic's own .FTZ stays dropped: Metal has no denormal mode, and a flush on every FADD, FMUL and FFMA would cost far more than it can show
+        private static Operand AFtz(EmitterContext context, AmpereOp x, Operand v)
+        {
+            return x.Bit(80) ? FlushDenormal(context, v) : v;
+        }
+
         // FSET Rd, a, b: 1.0 where (a cmp b) bop P (87..90) holds, else 0.0
         public static void AFset(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b) = ASecond(context, x);
 
-            Operand res = GetFPComparison(context, (FComp)x.Bits(76, 80), AFloat(context, a), AFloat(context, b));
+            Operand res = GetFPComparison(context, (FComp)x.Bits(76, 80), AFtz(context, x, AFloat(context, a)), AFtz(context, x, AFloat(context, b)));
             res = GetPredLogicalOp(context, (BoolOp)x.Bits(74, 76), res, APred(context, x, 87, 90));
 
             ASet(context, x, context.ConditionalSelect(res, ConstF(1), Const(0)));
@@ -189,7 +197,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b) = ASecond(context, x);
 
-            Operand cmp = GetFPComparison(context, (FComp)x.Bits(76, 80), AFloat(context, a), AFloat(context, b));
+            Operand cmp = GetFPComparison(context, (FComp)x.Bits(76, 80), AFtz(context, x, AFloat(context, a)), AFtz(context, x, AFloat(context, b)));
             Operand p = APred(context, x, 87, 90);
             BoolOp bop = (BoolOp)x.Bits(74, 76);
 
@@ -1320,18 +1328,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
         }
 
-        // UP2UR URd, URZ, 1: the uniform predicate UP0 as 0 or 1 in a uniform register. Pokemon Pokopia's two compute shaders with it use this one encoding (a mask over UP0..UP6 with a merge source
-        // is P2R's form, not seen here)
+        // UP2UR URd, URZ, mask: bit k of URd is the uniform predicate UPk where bit k of the mask is set, as P2R does for the general predicates (7 is the always-true UPT).
+        // Pokemon Pokopia's compute shaders use mask 1. Mario Kart World's pixel shaders save one predicate with mask 8 or 0x40 and test the register against URZ later
         public static void AUp2ur(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || x.Imm32 != 1)
+            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || (x.Imm32 & ~0xffu) != 0)
             {
-                throw AFail(context, "UP2UR with a merge source or another mask");
+                throw AFail(context, "UP2UR with a merge source or a mask past the predicates");
             }
 
-            ASet(context, x, context.ConditionalSelect(APredReg(0, uniform: true), Const(1), Const(0)), uniform: true);
+            Operand res = Const(0);
+
+            for (int k = 0; k < 8; k++)
+            {
+                if ((x.Imm32 >> k & 1) != 0)
+                {
+                    res = context.BitwiseOr(res, context.ConditionalSelect(APredReg(k, uniform: true), Const(1 << k), Const(0)));
+                }
+            }
+
+            ASet(context, x, res, uniform: true);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)
