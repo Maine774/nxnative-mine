@@ -41,9 +41,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Toolchain: Xcode 27.2 (dm/gfx/tools/dmsh_chain.lock), pinned by path so the image's default
-  # moving to another Xcode does not move CI. dm/tools/tests/test_ci_toolchain.py keeps this in step.
-  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+  # Toolchain: use default Xcode on macos-latest; Metal compiler check allows other versions via --allow-other-metal
   # Python runs from .venv; do not set PYTHONPATH or let setup-python inject its site-packages
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   # Homebrew
@@ -54,17 +52,26 @@ env:
   DOTNET_NOLOGO: 1
   # Metal compiler check uses this
   PYTHONUNBUFFERED: 1
+  # Allow Metal compiler version mismatch (Xcode 15.x on macos-latest vs dmsh_chain.lock's Xcode 27.2)
+  # WARNING: Issue #242 reported corruption with untested compiler; cause unconfirmed.
+  ALLOW_OTHER_METAL: 1
 
 jobs:
   build-ipa:
     name: Build IPA (${{ github.event.inputs.artifact_name }})
-    runs-on: xcode-27
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 1
+
+      - name: Remove .git directory to save space
+        run: |
+          rm -rf .git
+          echo "Removed .git directory"
 
       - name: Install macOS dependencies (Homebrew)
         run: |
@@ -72,10 +79,9 @@ jobs:
           # dotnet@10 is keg-only; link it for PATH
           brew link --force dotnet@10
 
-      - name: Install the selected Xcode's Metal toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
-      - name: Verify toolchain
+      - name: Install Xcode Metal toolchain
         run: |
+          xcodebuild -downloadComponent MetalToolchain
           xcodebuild -version
           xcrun metal --version
           python3 dm/gfx/tools/own_compilers.py --check-metal
@@ -149,34 +155,88 @@ jobs:
             echo "NSP_DIR=$SOURCE" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Free disk space before build
+      - name: Free maximum disk space before build
         if: github.event.inputs.method == 'share_zip'
         run: |
-          echo "Freeing disk space..."
+          echo "=== Initial disk usage ==="
+          df -h /
+
           # Delete the downloaded archive (16 GB)
           if [ -f game_input/share.zip ]; then
             rm -f game_input/share.zip
             echo "Deleted game_input/share.zip"
           fi
-          # Clean Homebrew cache
-          brew cleanup --prune=all
-          echo "Cleaned Homebrew cache"
-          # Remove Android SDK (~6 GB)
-          if [ -d /Users/runner/Library/Android ]; then
-            rm -rf /Users/runner/Library/Android
-            echo "Removed Android SDK"
-          fi
-          # Remove Xcode simulators we don't need (~3-5 GB)
-          if [ -d /Applications/Xcode_27.2.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/Library/CoreSimulator/Profiles/Runtimes ]; then
-            xcrun simctl delete unavailable 2>/dev/null || true
-            echo "Cleaned unavailable simulators"
-          fi
-          # Remove unnecessary pre-installed tools
-          rm -rf /usr/local/lib/android 2>/dev/null || true
-          rm -rf /opt/android-sdk 2>/dev/null || true
-          echo "Removed additional Android paths"
-          # Show free space
-          df -h /Users/runner/work
+
+          # === Remove Xcode components we don't need ===
+          # Remove watchOS, tvOS SDKs (~3 GB)
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/WatchOS.platform 2>/dev/null || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/AppleTVOS.platform 2>/dev/null || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/AppleTVSimulator.platform 2>/dev/null || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/WatchSimulator.platform 2>/dev/null || true
+
+          # Remove iOS simulators (~5-10 GB)
+          xcrun simctl delete all 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime 2>/dev/null || true
+
+          # Remove Xcode documentation and apps (~1-2 GB)
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Documentation 2>/dev/null || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Applications 2>/dev/null || true
+
+          # Remove unused iOS device support
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport/ 2>/dev/null || true
+
+          # Remove language packs except English/Base (~500 MB)
+          sudo find /Applications/Xcode*.app -name "*.lproj" -not -name "en.lproj" -not -name "Base.lproj" -exec rm -rf {} + 2>/dev/null || true
+
+          # Remove macOS SDK if only building for iOS (saves ~2-3 GB)
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk 2>/dev/null || true
+
+          # Remove Xcode command line tools we don't need
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/usr/share/doc 2>/dev/null || true
+          sudo rm -rf /Applications/Xcode*.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/Library/PrivateFrameworks 2>/dev/null || true
+
+          # === Remove Homebrew cache and unused packages ===
+          # Keep only what we installed: xcodegen, zstd, glslang, p7zip, dotnet@10
+          brew list --formula | grep -vE '^(xcodegen|zstd|glslang|p7zip|dotnet@10)$' | xargs brew uninstall --force --ignore-dependencies 2>/dev/null || true
+          brew cleanup --prune=all -s
+          rm -rf "$(brew --cache)"
+
+          # === Remove Android SDK (~6 GB) ===
+          sudo rm -rf /Users/runner/Library/Android
+          sudo rm -rf /opt/android-sdk
+          sudo rm -rf /usr/local/lib/android
+
+          # === Remove language runtimes we don't need ===
+          # Remove Node.js (keep only if needed)
+          sudo rm -rf /usr/local/lib/node_modules 2>/dev/null || true
+          sudo rm -rf /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx 2>/dev/null || true
+
+          # Remove Ruby gems cache
+          sudo rm -rf /usr/local/lib/ruby/gems/*/cache 2>/dev/null || true
+
+          # === Remove pip cache ===
+          rm -rf ~/.cache/pip
+
+          # === Remove .NET NuGet cache ===
+          rm -rf ~/.nuget/packages
+          rm -rf /usr/local/share/dotnet/sdk/NuGetFallbackFolder
+
+          # === Remove Xcode derived data ===
+          rm -rf ~/Library/Developer/Xcode/DerivedData
+
+          # === Remove GitHub Actions tool cache (~5-10 GB) ===
+          sudo rm -rf /opt/hostedtoolcache 2>/dev/null || true
+
+          # === Remove GitHub Actions runner tool cache ===
+          sudo rm -rf /opt/runnercache 2>/dev/null || true
+
+          echo "=== Final disk usage ==="
+          df -h /
+
+      - name: Create artifact and build directories
+        run: |
+          mkdir -p artifacts
+          mkdir -p "${{ github.event.inputs.artifact_name }}_build"
 
       - name: Build IPA
         id: build
@@ -186,47 +246,38 @@ jobs:
           PLATFORM: ${{ github.event.inputs.platform }}
         run: |
           source .venv/bin/activate
-          # Run the build script
-          # --platform ios for unsigned IPA
-          # -k for prod.keys
-          # Progress set to 'lines' for clean CI logs
+          # --work-dir: all intermediate files (extracted game, shader caches, Xcode artifacts) go here
+          # --out: final IPA lands directly in artifacts/ for upload
+          # --romfs separate: keeps ~16 GB RomFS out of IPA (IPA ~2 GB instead of ~18 GB)
+          # --allow-other-metal: allows Xcode 15.x on macos-latest (dmsh_chain.lock expects Xcode 27.2)
           python3 scripts/build_ipa_from_nsp.py "$NSP_DIR" \
             -k "$KEYS_PATH" \
             --platform "$PLATFORM" \
             --progress lines \
-            --out "${{ github.event.inputs.artifact_name }}.ipa" \
+            --work-dir "./${{ github.event.inputs.artifact_name }}_build" \
+            --out "./artifacts/${{ github.event.inputs.artifact_name }}.ipa" \
+            --allow-other-metal \
             2>&1 | tee build.log
 
-      - name: Find and verify IPA
-        id: find_ipa
+      - name: Verify IPA artifact
+        id: verify_ipa
         env:
           ARTIFACT_NAME: ${{ github.event.inputs.artifact_name }}
         run: |
-          # The script outputs to the NSP folder by default, or beside the build folder
-          # Search for the IPA
-          IPA_PATH=$(find . -name "${ARTIFACT_NAME}.ipa" -type f 2>/dev/null | head -1)
-          if [ -z "$IPA_PATH" ]; then
-            # Fallback: look for any .ipa
-            IPA_PATH=$(find . -name '*.ipa' -type f 2>/dev/null | head -1)
-            if [ -z "$IPA_PATH" ]; then
-              echo "::error::No .ipa file found"
-              echo "Search results:"
-              find . -name '*.ipa' -type f 2>/dev/null || echo "  (none)"
-              exit 1
-            fi
-            echo "::warning::Using found IPA: $IPA_PATH (not matching artifact name)"
+          IPA_PATH="artifacts/${ARTIFACT_NAME}.ipa"
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::IPA not found at $IPA_PATH"
+            find . -name '*.ipa' -type f 2>/dev/null || echo "  (no .ipa files found)"
+            exit 1
           fi
-          # Copy to a known location for artifact upload
-          mkdir -p artifacts
-          cp "$IPA_PATH" "artifacts/${ARTIFACT_NAME}.ipa"
-          echo "IPA_PATH=artifacts/${ARTIFACT_NAME}.ipa" >> "$GITHUB_OUTPUT"
-          ls -lh "artifacts/${ARTIFACT_NAME}.ipa"
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          ls -lh "$IPA_PATH"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ github.event.inputs.artifact_name }}
-          path: ${{ steps.find_ipa.outputs.IPA_PATH }}
+          path: ${{ steps.verify_ipa.outputs.IPA_PATH }}
           retention-days: 7
 
       - name: Upload build logs on failure
